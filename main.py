@@ -1,55 +1,37 @@
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import FSInputFile
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+from aiogram.utils import executor
+from aiogram.types import InputFile
 import os
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+API_TOKEN = '8110894182:AAHjRQyoWxKVcIvC6vspcRxLB7Nu0MjDlMs'
+ADMIN_ID = 6734490263
+CHANNEL_ID = -1002509288899
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-@dp.message(commands=["start"])
-async def start_handler(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    await message.answer("Send me a video, bro.")
-
-@dp.message(content_types=types.ContentType.VIDEO)
+@dp.message_handler(content_types=types.ContentType.VIDEO)
 async def handle_video(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
+    
+    await message.reply("Send me the *title* of the video:", parse_mode="Markdown")
+    dp.register_message_handler(lambda msg: get_title(msg, message.video), content_types=types.ContentType.TEXT, state=None)
 
-    await message.answer("Send me the title.")
-    dp["video"] = message.video.file_id  # Store video temporarily
-    dp["step"] = "awaiting_title"
+async def get_title(title_msg: types.Message, video):
+    title = title_msg.text
+    await title_msg.reply("Now send me the *thumbnail* image (or type 'skip')", parse_mode="Markdown")
+    
+    dp.register_message_handler(lambda msg: get_thumbnail(msg, video, title), content_types=[types.ContentType.PHOTO, types.ContentType.TEXT], state=None)
 
-@dp.message()
-async def handle_title_and_post(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
+async def get_thumbnail(thumbnail_msg: types.Message, video, title):
+    if thumbnail_msg.text and thumbnail_msg.text.lower() == "skip":
+        await bot.send_video(chat_id=CHANNEL_ID, video=video.file_id, caption=title)
+    elif thumbnail_msg.photo:
+        thumbnail_file_id = thumbnail_msg.photo[-1].file_id
+        await bot.send_video(chat_id=CHANNEL_ID, video=video.file_id, caption=title, thumb=thumbnail_file_id)
+    else:
+        await thumbnail_msg.reply("Invalid thumbnail. Try again or type 'skip'.")
 
-    if dp.get("step") == "awaiting_title":
-        video_file = dp["video"]
-        title = message.text
-        await bot.send_video(CHANNEL_ID, video=video_file, caption=title)
-        await message.answer("Video sent to channel.")
-        dp["step"] = None
-        dp["video"] = None
-
-# Webhook app setup
-async def on_startup(app):
-    webhook_url = os.getenv("WEBHOOK_URL")
-    await bot.set_webhook(webhook_url)
-
-app = web.Application()
-app["bot"] = bot
-SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-app.on_startup.append(on_startup)
-setup_application(app, dp, bot=bot)
-
-if __name__ == "__main__":
-    web.run_app(app, port=int(os.getenv("PORT", 8000)))
+if __name__ == '__main__':
+    executor.start_polling(dp)
