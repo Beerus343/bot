@@ -1,83 +1,107 @@
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import os, requests
-from dotenv import load_dotenv
+import os
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils import executor
+from datetime import datetime
+import aiofiles
 
-load_dotenv()
-
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-LV_COOKIES = os.getenv("LINKVERTISE_COOKIES")
-LV_USER_AGENT = os.getenv("LINKVERTISE_USER_AGENT")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
 
-app = Client("diskwala_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
+# Store state per user session
 user_sessions = {}
 
-def shorten_linkvertise(diskwala_url):
-    headers = {
-        "Cookie": LV_COOKIES,
-        "User-Agent": LV_USER_AGENT,
-    }
-    data = {
-        "url": diskwala_url
-    }
-    response = requests.post("https://publisher.linkvertise.com/api/link/create", headers=headers, data=data)
-    try:
-        return response.json()['data']['link']
-    except:
-        return None
+# Command: /start
+@dp.message_handler(commands=['start'])
+async def start_cmd(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    await message.reply("Yo! Send the video you want to upload.")
 
-@app.on_message(filters.private & filters.text)
-async def handle_link(client, message):
-    user_id = message.from_user.id
-    if user_id not in user_sessions:
-        if not message.text.startswith("http"):
-            await message.reply("Send a valid DiskWala link to start.")
-            return
-        user_sessions[user_id] = {'link': message.text}
-        await message.reply("Send the title for the post:")
-    elif 'title' not in user_sessions[user_id]:
-        user_sessions[user_id]['title'] = message.text
-        await message.reply("Send the thumbnail image URL:")
-    elif 'thumbnail' not in user_sessions[user_id]:
-        user_sessions[user_id]['thumbnail'] = message.text
-        link = user_sessions[user_id]['link']
-        title = user_sessions[user_id]['title']
-        thumb = user_sessions[user_id]['thumbnail']
+# Step 1: Receive Video
+@dp.message_handler(content_types=types.ContentType.VIDEO)
+async def handle_video(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
 
-        short_link = shorten_linkvertise(link)
-        if not short_link:
-            await message.reply("❌ Failed to shorten with Linkvertise. Check your cookies/session.")
-            user_sessions.pop(user_id)
-            return
+    user_sessions[message.from_user.id] = {"video": message.video.file_id}
+    await message.reply("Now send the thumbnail image.")
 
-        caption = f"""📥 <b>{title}</b>
+# Step 2: Receive Thumbnail
+@dp.message_handler(content_types=types.ContentType.PHOTO)
+async def handle_thumbnail(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
 
-🎯 <b>Fast Download via DiskWala</b>  
-💸 <i>Powered by Linkvertise</i>  
-        
-Click the button below to download ⬇️"""
+    if message.from_user.id in user_sessions:
+        user_sessions[message.from_user.id]["thumbnail"] = message.photo[-1].file_id
+        await message.reply("Cool. Now send the title for your post.")
 
-        btn = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Download Now", url=short_link)]
-        ])
+# Step 3: Receive Title and Post Options
+@dp.message_handler(content_types=types.ContentType.TEXT)
+async def handle_title_or_schedule(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
 
-        try:
-            await client.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=thumb,
-                caption=caption,
-                reply_markup=btn,
-                parse_mode="html"
-            )
-            await message.reply("✅ Successfully posted to channel.")
-        except Exception as e:
-            await message.reply(f"❌ Failed to post: {e}")
+    session = user_sessions.get(message.from_user.id, {})
+    if "thumbnail" in session and "video" in session and "title" not in session:
+        session["title"] = message.text
+        user_sessions[message.from_user.id] = session
+        await message.reply("Got it. Send time to post (HH:MM in 24hr) or type `now`.")
+        return
 
-        user_sessions.pop(user_id)
+    # Step 4: Time to post
+    session = user_sessions.get(message.from_user.id, {})
+    if "title" in session and session.get("scheduled") != True:
+        if message.text.lower() == "now":
+            await post_video(session)
+        else:
+            try:
+                post_time = datetime.strptime(message.text, "%H:%M").time()
+                session["scheduled"] = True
+                now = datetime.now()
+                target_time = datetime.combine(now.date(), post_time)
+                if target_time < now:
+                    target_time = datetime.combine(now.date(), post_time) + timedelta(days=1)
+                delay = (target_time - now).total_seconds()
+                await message.reply(f"Scheduled! Will post at {post_time.strftime('%H:%M')}.")
+                asyncio.create_task(schedule_post(session, delay))
+            except Exception as e:
+                await message.reply("Invalid time format. Use HH:MM (24hr).")
 
-app.run()
+async def schedule_post(session, delay):
+    await asyncio.sleep(delay)
+    await post_video(session)
+
+async def post_video(session):
+    video = session["video"]
+    thumb = session["thumbnail"]
+    title = session["title"]
+
+    # DISKWALA upload logic would be here - simulated for now
+    diskwala_link = "https://diskwala.link/yourvideo"
+
+    btn = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📥 Download Now", url=diskwala_link)
+    ]])
+
+    await bot.send_video(
+        chat_id=CHANNEL_ID,
+        video=video,
+        thumb=thumb,
+        caption=f"🔥 {title}",
+        reply_markup=btn
+    )
+
+    # Optionally send a success log to admin or store it
+
+    del user_sessions[OWNER_ID]
+
+if __name__ == "__main__":
+    from aiogram import executor
+    executor.start_polling(dp)
