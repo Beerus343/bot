@@ -1,45 +1,55 @@
-import os
-from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile
-from aiogram.dispatcher.webhook import get_new_configured_app
+from aiogram.types import FSInputFile
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+import os
 
-API_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-WEBHOOK_HOST = 'https://your-render-app-name.onrender.com'
-WEBHOOK_PATH = f'/webhook/{API_TOKEN}'
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+@dp.message(commands=["start"])
+async def start_handler(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.answer("Send me a video, bro.")
 
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-
-@dp.message_handler(content_types=types.ContentType.VIDEO, user_id=ADMIN_ID)
+@dp.message(content_types=types.ContentType.VIDEO)
 async def handle_video(message: types.Message):
-    await message.reply("Send the thumbnail image now:")
-    dp.register_message_handler(get_thumbnail, content_types=types.ContentType.PHOTO, state=None)
+    if message.from_user.id != ADMIN_ID:
+        return
 
-async def get_thumbnail(message: types.Message):
-    thumbnail = message.photo[-1]
-    await message.reply("Send the title for the video:")
-    dp.register_message_handler(lambda m: post_to_channel(m, thumbnail), content_types=types.ContentType.TEXT, state=None)
+    await message.answer("Send me the title.")
+    dp["video"] = message.video.file_id  # Store video temporarily
+    dp["step"] = "awaiting_title"
 
-async def post_to_channel(message: types.Message, thumbnail):
-    caption = message.text
-    file_id = message.reply_to_message.video.file_id
-    await bot.send_video(CHANNEL_ID, video=file_id, caption=caption, thumb=thumbnail.file_id)
-    await message.reply("✅ Posted to channel!")
+@dp.message()
+async def handle_title_and_post(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
 
-async def on_shutdown(app):
-    await bot.delete_webhook()
+    if dp.get("step") == "awaiting_title":
+        video_file = dp["video"]
+        title = message.text
+        await bot.send_video(CHANNEL_ID, video=video_file, caption=title)
+        await message.answer("Video sent to channel.")
+        dp["step"] = None
+        dp["video"] = None
 
-app = get_new_configured_app(dispatcher=dp, path=WEBHOOK_PATH)
+# Webhook app setup
+async def on_startup(app):
+    webhook_url = os.getenv("WEBHOOK_URL")
+    await bot.set_webhook(webhook_url)
+
+app = web.Application()
+app["bot"] = bot
+SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
 app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
+setup_application(app, dp, bot=bot)
 
-if __name__ == '__main__':
-    web.run_app(app, host='0.0.0.0', port=int(os.environ.get('PORT', 3000)))
+if __name__ == "__main__":
+    web.run_app(app, port=int(os.getenv("PORT", 8000)))
